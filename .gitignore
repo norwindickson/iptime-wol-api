@@ -1,0 +1,11 @@
+# Secrets and local configuration
+*.env
+!config/*.env.example
+.env*
+!.env.example
+
+# Runtime and OS files
+*.log
+.DS_Store
+__pycache__/
+.pytest_cache/

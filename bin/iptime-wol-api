@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONFIG="${IPTIME_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/iptime-wol-api/iptime.env}"
+if [[ ! -r "$CONFIG" ]]; then
+  printf 'Missing %s\n' "$CONFIG" >&2
+  printf 'Copy config/iptime.env.example and fill it locally.\n' >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+source "$CONFIG"
+
+: "${IPTIME_HOST:?IPTIME_HOST is required}"
+: "${IPTIME_PORT:=1234}"
+: "${IPTIME_WOL_USER:?IPTIME_WOL_USER is required}"
+: "${IPTIME_WOL_PASS:?IPTIME_WOL_PASS is required}"
+: "${IPTIME_WOL_MAC:?IPTIME_WOL_MAC is required}"
+
+BASE="http://${IPTIME_HOST}:${IPTIME_PORT}"
+MAC=$(printf '%s' "$IPTIME_WOL_MAC" | tr ':' '-' | tr '[:lower:]' '[:upper:]')
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+COOKIE="$WORK/cookies"
+LOGIN_JSON="$WORK/login.json"
+LOGIN_RESPONSE="$WORK/login-response.json"
+SHOW_RESPONSE="$WORK/show-response.json"
+SIGNAL_JSON="$WORK/signal.json"
+SIGNAL_RESPONSE="$WORK/signal-response.json"
+
+python3 - "$IPTIME_WOL_USER" "$IPTIME_WOL_PASS" > "$LOGIN_JSON" <<'PY'
+import json, sys
+print(json.dumps({"method": "session/login", "params": {"id": sys.argv[1], "pw": sys.argv[2]}}, separators=(",", ":")))
+PY
+
+curl -fsS -c "$COOKIE" -b "$COOKIE" \
+  -H "Referer: ${BASE}/ui/" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary @"$LOGIN_JSON" \
+  "$BASE/cgi/service.cgi" -o "$LOGIN_RESPONSE"
+python3 - "$LOGIN_RESPONSE" <<'PY'
+import json, sys
+if json.load(open(sys.argv[1])).get("result") != "done":
+    raise SystemExit("ipTIME login failed")
+PY
+
+curl -fsS -c "$COOKIE" -b "$COOKIE" \
+  -H "Referer: ${BASE}/ui/" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data '{"method":"wol/show"}' \
+  "$BASE/cgi/service.cgi" -o "$SHOW_RESPONSE"
+python3 - "$SHOW_RESPONSE" "$MAC" <<'PY'
+import json, sys
+items = json.load(open(sys.argv[1])).get("result") or []
+mac = sys.argv[2]
+if not any(str(item.get("mac", "")).upper().replace(":", "-") == mac for item in items):
+    raise SystemExit("target MAC is not registered in ipTIME WOL")
+PY
+
+python3 - "$MAC" > "$SIGNAL_JSON" <<'PY'
+import json, sys
+print(json.dumps({"method": "wol/signal", "params": [sys.argv[1]]}, separators=(",", ":")))
+PY
+curl -fsS -c "$COOKIE" -b "$COOKIE" \
+  -H "Referer: ${BASE}/ui/" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary @"$SIGNAL_JSON" \
+  "$BASE/cgi/service.cgi" -o "$SIGNAL_RESPONSE"
+python3 - "$SIGNAL_RESPONSE" <<'PY'
+import json, sys
+x = json.load(open(sys.argv[1]))
+if x.get("error") is not None:
+    raise SystemExit("ipTIME WOL signal failed")
+print("WOL_RESULT=" + str(x.get("result")))
+PY

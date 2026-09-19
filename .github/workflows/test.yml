@@ -1,0 +1,13 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax and secret-safety checks
+        run: ./tests/test_static.sh
